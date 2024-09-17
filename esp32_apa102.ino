@@ -1,99 +1,115 @@
-#include <WiFi.h>
-#include <ArtnetWifi.h>
-#include <Adafruit_DotStar.h>
-#include <WebServer.h>
+#include <Arduino.h>
 #include <EEPROM.h>
-#include <ESPmDNS.h>  // Include the ESPmDNS library
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Adafruit_DotStar.h>
+#include <ArtnetWifi.h>
 
-// APA102 LED strip configuration
+// Art-Net and LED strip settings
+int universe = 0;
 const int numLeds = 30;
 const int dataPin = 14;
 const int clockPin = 12;
+const int builtInLedPin = 2;
+
 Adafruit_DotStar strip = Adafruit_DotStar(numLeds, dataPin, clockPin, DOTSTAR_BGR);
-
-// Art-Net configuration
 ArtnetWifi artnet;
-int universe = 0; // Default universe
-WebServer server(80); // Web server for Wi-Fi settings
+WebServer server(80);
 
-// Wi-Fi settings
-const char* defaultSSID = "wifi";
-const char* defaultPassword = "pass";
+// Wi-Fi and network settings
+const char* defaultSSID = "____2Ghz";
+const char* defaultPassword = "Aa00000000";
 String ssid = defaultSSID;
 String password = defaultPassword;
 
-// EEPROM Addresses for saving Wi-Fi credentials
+// EEPROM Addresses
 const int ssidAddr = 0;
 const int passwordAddr = 32;
 
-// GPIO for ESP-01 built-in LED
-const int builtInLedPin = 2;
-
-unsigned long lastDmxPacketTime = 0; // To track Art-Net packet receipt time
+// Variables for controlling LED blinking
+unsigned long lastLedToggleTime = 0;
+bool ledState = false;
+unsigned long lastDmxPacketTime = 0;
 unsigned long dmxTimeout = 5000;     // Timeout for DMX data (5 seconds)
 
-// Function to save Wi-Fi credentials to EEPROM
+// LED blink intervals (in milliseconds)
+const int apModeBlinkInterval = 1000;   // Slow blink for AP mode
+const int wifiSearchBlinkInterval = 250; // Fast blink when searching for Wi-Fi
+const int artnetBlinkInterval = 100;    // Quick blink when receiving Art-Net data
+int currentBlinkInterval = 0;           // Current blink interval based on mode
+
+bool artnetActive = false; // To track if Art-Net is active
+
 void saveWiFiCredentials(const String& ssid, const String& password) {
   EEPROM.writeString(ssidAddr, ssid);
   EEPROM.writeString(passwordAddr, password);
   EEPROM.commit();
 }
 
-// Function to load Wi-Fi credentials from EEPROM
 void loadWiFiCredentials() {
   ssid = EEPROM.readString(ssidAddr);
   password = EEPROM.readString(passwordAddr);
 }
 
-// Function to set up the Access Point mode
-void setupAP() {
-  WiFi.softAP("QuantaLed11", "00000000");
+void blinkLed() {
+  unsigned long currentTime = millis();
+  if (currentBlinkInterval > 0 && currentTime - lastLedToggleTime >= currentBlinkInterval) {
+    ledState = !ledState;
+    digitalWrite(builtInLedPin, ledState);
+    lastLedToggleTime = currentTime;
+  }
+}
+
+// Function to set up both Access Point and Station modes
+void setupDualWiFi() {
+  WiFi.mode(WIFI_AP_STA); // Set both AP and STA modes
+
+  // Start the AP mode
+  WiFi.softAP("_Led11", "00000000");
   Serial.print("AP IP Address: ");
   Serial.println(WiFi.softAPIP());
 
-  if (!MDNS.begin("QuantaLed11")) {
-    Serial.println("Error setting up mDNS responder!");
-  } else {
-    Serial.println("mDNS responder started");
-  }
-}
-
-// Function to connect to Wi-Fi
-void connectToWiFi() {
-  WiFi.mode(WIFI_STA);
+  // Attempt to connect to stored Wi-Fi credentials in STA mode
   WiFi.begin(ssid.c_str(), password.c_str());
-  int counter = 0;
-  while (WiFi.status() != WL_CONNECTED && counter < 30) {
+  currentBlinkInterval = wifiSearchBlinkInterval;  // Set blink interval for Wi-Fi search
+
+  int retryCount = 0;
+  while (WiFi.status() != WL_CONNECTED && retryCount < 30) {
     delay(500);
     Serial.print(".");
-    counter++;
-    digitalWrite(builtInLedPin, counter % 2); // Blink LED while connecting
+    retryCount++;
+    blinkLed(); // Blink while searching for Wi-Fi
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Failed to connect, setting up AP...");
-    setupAP();
-  } else {
-    Serial.println("\nConnected!");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConnected to Wi-Fi!");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
-    digitalWrite(builtInLedPin, HIGH); // Solid LED when connected
+    digitalWrite(builtInLedPin, HIGH);  // Solid LED when connected to Wi-Fi
+    currentBlinkInterval = 0;           // Stop blinking (solid ON) in Wi-Fi connected mode
 
-    if (!MDNS.begin("QuantaLed11")) {
-      Serial.println("Error setting up mDNS responder!");
+    if (!MDNS.begin("led11")) {  // Start the mDNS responder for led11.local
+      Serial.println("Error setting up MDNS responder!");
     } else {
       Serial.println("mDNS responder started");
     }
+  } else {
+    Serial.println("\nFailed to connect to Wi-Fi.");
+    currentBlinkInterval = apModeBlinkInterval;  // Stay in AP mode blink if Wi-Fi fails
   }
 }
 
-// Function to handle the web interface
+// Setup a web server for Wi-Fi configuration
 void setupWebServer() {
   server.on("/", [ssid, password, universe]() mutable {
-    String ipAddr = WiFi.localIP().toString();
+    String apIpAddr = WiFi.softAPIP().toString();
+    String staIpAddr = WiFi.localIP().toString();
+
     String html = "<html><body>"
-                  "<h1>Quanta Led Box 11</h1>"
-                  "<p>IP Address: " + ipAddr + "</p>"
+                  "<h1>Quanta DMX Led 11</h1>"
+                  "<p>AP IP Address: " + apIpAddr + "</p>"
+                  "<p>STA IP Address: " + staIpAddr + "</p>"
                   "<form action='/setwifi' method='POST'>"
                   "SSID:<input type='text' name='ssid' value='" + ssid + "'><br>"
                   "Password:<input type='password' name='password' value='" + password + "'><br>"
@@ -109,56 +125,62 @@ void setupWebServer() {
     password = server.arg("password");
     universe = server.arg("universe").toInt();
     saveWiFiCredentials(ssid, password);
-    connectToWiFi();
-    server.send(200, "text/plain", "Settings updated. Please reconnect to the AP if needed.");
+    setupDualWiFi();  // Reconnect to Wi-Fi with new credentials
+    server.send(200, "text/plain", "Settings updated. Please reconnect.");
   });
 
   server.begin();
 }
 
-// Art-Net callback function to handle incoming DMX data
-void onDmxFrame(uint16_t receivedUniverse, uint16_t length, uint8_t sequence, uint8_t* data) {
-  if (receivedUniverse == universe && length >= numLeds * 3) {
-    lastDmxPacketTime = millis(); // Update the last packet time
-
-    for (int i = 0; i < numLeds; i++) {
-      int pixelIndex = i * 3;
-      uint8_t r = data[pixelIndex];
-      uint8_t g = data[pixelIndex + 1];
-      uint8_t b = data[pixelIndex + 2];
-      strip.setPixelColor(i, strip.Color(r, g, b));
+// Function to handle Art-Net data reception and LED control
+void setupArtNet() {
+  artnet.begin();
+  artnet.setArtDmxCallback([](uint16_t receivedUniverse, uint16_t length, uint8_t sequence, uint8_t* data) {
+    if (receivedUniverse == universe && length >= numLeds * 3) {
+      lastDmxPacketTime = millis(); // Update the last packet time
+      for (int i = 0; i < numLeds; i++) {
+        int pixelIndex = i * 3;
+        strip.setPixelColor(i, strip.Color(data[pixelIndex], data[pixelIndex + 1], data[pixelIndex + 2]));
+      }
+      strip.show();
+      currentBlinkInterval = artnetBlinkInterval; // Set blink interval for Art-Net reception
+      artnetActive = true;  // Mark Art-Net as active
     }
-    strip.show();
+  });
+}
+
+void loop() {
+  artnet.read();
+  server.handleClient();
+
+  // Continuously blink the LED according to the current mode
+  blinkLed();
+
+  // Check for DMX timeout
+  if (millis() - lastDmxPacketTime > dmxTimeout) {
+    if (artnetActive) {
+      // Freeze the last valid frame if Art-Net becomes inactive
+      artnetActive = false;  // Mark as inactive
+    }
+
+    if (currentBlinkInterval == artnetBlinkInterval) {
+      currentBlinkInterval = wifiSearchBlinkInterval; // Return to Wi-Fi search blink when no Art-Net data
+    }
   }
 }
 
-// Main setup function
 void setup() {
   Serial.begin(115200);
-  EEPROM.begin(512); // Initialize EEPROM
-  loadWiFiCredentials(); // Load stored Wi-Fi credentials
+  EEPROM.begin(512);
+  loadWiFiCredentials();
   pinMode(builtInLedPin, OUTPUT);
 
-  connectToWiFi();   // Attempt to connect to Wi-Fi
-  setupWebServer();  // Start the web server
-  strip.begin();     // Initialize the APA102 LED strip
+  setupDualWiFi();  // Set up dual-mode Wi-Fi (AP and STA)
+
+  setupWebServer();
+  strip.begin();
   strip.clear();
   strip.show();
-
-  // Initialize Art-Net
-  artnet.begin();
-  artnet.setArtDmxCallback(onDmxFrame);
+  setupArtNet();
 }
 
-// Main loop function
-void loop() {
-  artnet.read();       // Read Art-Net data
-  server.handleClient(); // Handle web server requests
-
-  // Reset LEDs if no DMX data is received for a while
-  if (millis() - lastDmxPacketTime > dmxTimeout) {
-    strip.clear();  // Turn off LEDs after timeout
-    strip.show();
-    lastDmxPacketTime = millis(); // Reset the timeout to avoid continuous clearing
-  }
-}
