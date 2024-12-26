@@ -1,31 +1,39 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Adafruit_DotStar.h>
 #include <ArtnetWifi.h>
-#include <OSCMessage.h>
 
-const int universe = 0, numLeds = 30, dataPin = 14, clockPin = 12, builtInLedPin = 2;
-const int encoderPinA = 4, encoderPinB = 18, encoderButtonPin = 15;
-const char* defaultSSID = "____2Ghz";
-const char* defaultPassword = "Aa00000000";
-String ssid = defaultSSID, password = defaultPassword;
-const int ssidAddr = 0, passwordAddr = 32;
-unsigned long lastLedToggleTime = 0, lastDmxPacketTime = 0, dmxTimeout = 5000;
-const int apModeBlinkInterval = 2000, artnetBlinkOnInterval = 500, artnetBlinkOffInterval = 150;
-int currentBlinkInterval = 0, oscValue = 0, lastEncoderStateA = LOW;
-bool artnetActive = false, wifiConnected = false;
-const unsigned long debounceDelay = 5;
-IPAddress broadcastIP;
-const int localPort = 8000, remotePort = 9000;
+// Art-Net and LED strip settings
+int universe = 0;
+const int numLeds = 30;
+const int dataPin = 14;
+const int clockPin = 12;
+const int builtInLedPin = 2;
 
-WiFiUDP Udp;
-Adafruit_DotStar strip(numLeds, dataPin, clockPin, DOTSTAR_BGR);
+Adafruit_DotStar strip = Adafruit_DotStar(numLeds, dataPin, clockPin, DOTSTAR_BGR);
 ArtnetWifi artnet;
 WebServer server(80);
+
+// Wi-Fi and network settings
+const char* defaultSSID = "____2Ghz";
+const char* defaultPassword = "Aa00000000";
+String ssid = defaultSSID;
+String password = defaultPassword;
+
+// EEPROM Addresses
+const int ssidAddr = 0;
+const int passwordAddr = 32;
+
+// Art-Net timing
+const int targetFrameRate = 24;  // Target frame rate in FPS
+const unsigned long frameInterval = 1000 / targetFrameRate; // Interval in milliseconds
+unsigned long lastFrameTime = 0;
+
+// Variables to track Art-Net state
+bool newFrameReceived = false;
 
 void saveWiFiCredentials(const String& ssid, const String& password) {
   EEPROM.writeString(ssidAddr, ssid);
@@ -38,91 +46,74 @@ void loadWiFiCredentials() {
   password = EEPROM.readString(passwordAddr);
 }
 
-void calculateBroadcastAddress() {
-  broadcastIP = (WiFi.localIP() & WiFi.subnetMask()) | ~WiFi.subnetMask();
-}
-
-void sendOscMessage(int value) {
-  OSCMessage msg("/atlas");
-  msg.add((int32_t)value);
-  Udp.beginPacket(broadcastIP, remotePort);
-  msg.send(Udp);
-  Udp.endPacket();
-  msg.empty();
-}
-
-void handleEncoder() {
-  int currentStateA = digitalRead(encoderPinA);
-  int currentStateB = digitalRead(encoderPinB);
-  bool valueChanged = false;
-
-  if ((currentStateA != lastEncoderStateA) && (millis() - lastDebounceTime > debounceDelay)) {
-    oscValue += (currentStateA == HIGH) ? (currentStateB == LOW ? 1 : -1) : 0;
-    valueChanged = true;
-    lastDebounceTime = millis();
+// Function to force reset LED strip state
+void resetStrip() {
+  strip.clear(); // Clear the LED strip (set all to black)
+  strip.show();  // Force update to apply the cleared state
+  delay(50);     // Small delay to ensure the reset is applied
+  for (int i = 0; i < numLeds; i++) {
+    strip.setPixelColor(i, 0); // Explicitly set all LEDs to black
   }
-  lastEncoderStateA = currentStateA;
-
-  if (digitalRead(encoderButtonPin) == LOW && (millis() - lastDebounceTime > debounceDelay)) {
-    oscValue += 10;
-    lastDebounceTime = millis();
-    valueChanged = true;
-  }
-
-  if (valueChanged) sendOscMessage(oscValue);
+  strip.show();  // Final show to ensure all LEDs are off
 }
 
-void blinkLed() {
-  unsigned long currentTime = millis();
-  if (currentBlinkInterval > 0 && currentTime - lastLedToggleTime >= currentBlinkInterval) {
-    ledState = !ledState;
-    digitalWrite(builtInLedPin, ledState);
-    lastLedToggleTime = currentTime;
-    currentBlinkInterval = artnetActive ? (ledState ? artnetBlinkOnInterval : artnetBlinkOffInterval) : currentBlinkInterval;
-  } else if (currentBlinkInterval == 0) {
-    digitalWrite(builtInLedPin, HIGH);
-  } else if (currentBlinkInterval < 0) {
-    digitalWrite(builtInLedPin, LOW);
-  }
-}
-
+// Function to set up Wi-Fi
 void setupDualWiFi() {
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("_Led11", "00000000");
-  WiFi.begin(ssid.c_str(), password.c_str());
-  currentBlinkInterval = apModeBlinkInterval;
 
+  // Start AP mode
+  WiFi.softAP("_Led11", "00000000");
+  Serial.print("AP IP Address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Attempt to connect to Wi-Fi in STA mode
+  WiFi.begin(ssid.c_str(), password.c_str());
   int retryCount = 0;
+
   while (WiFi.status() != WL_CONNECTED && retryCount < 30) {
-    delay(500);
+    delay(100);
+    Serial.print(".");
     retryCount++;
-    blinkLed();
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    currentBlinkInterval = 0;
-    wifiConnected = true;
-    calculateBroadcastAddress();
-    MDNS.begin("led11");
+    Serial.println("\nConnected to Wi-Fi!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    if (!MDNS.begin("led11")) {
+      Serial.println("Error setting up MDNS responder!");
+    } else {
+      Serial.println("mDNS responder started");
+    }
   } else {
-    currentBlinkInterval = apModeBlinkInterval;
-    wifiConnected = false;
+    Serial.println("\nFailed to connect to Wi-Fi.");
   }
 }
 
+// Setup the web server for configuration
 void setupWebServer() {
   server.on("/", []() {
-    String html = "<html><body><h1>Quanta DMX Led 11</h1><p>AP IP: " + WiFi.softAPIP().toString() +
-                  "</p><p>STA IP: " + WiFi.localIP().toString() +
-                  "</p><form action='/setwifi' method='POST'>SSID:<input type='text' name='ssid' value='" + ssid +
-                  "'><br>Password:<input type='password' name='password' value='" + password +
-                  "'><br>DMX Universe:<input type='number' name='universe'><br><input type='submit' value='Update'></form></body></html>";
+    String apIpAddr = WiFi.softAPIP().toString();
+    String staIpAddr = WiFi.localIP().toString();
+
+    String html = "<html><body>"
+                  "<h1>Quanta DMX Led 11</h1>"
+                  "<p>AP IP Address: " + apIpAddr + "</p>"
+                  "<p>STA IP Address: " + staIpAddr + "</p>"
+                  "<form action='/setwifi' method='POST'>"
+                  "SSID:<input type='text' name='ssid'><br>"
+                  "Password:<input type='password' name='password'><br>"
+                  "DMX Universe:<input type='number' name='universe'><br>"
+                  "<input type='submit' value='Update'>"
+                  "</form>"
+                  "</body></html>";
     server.send(200, "text/html", html);
   });
 
   server.on("/setwifi", []() {
     ssid = server.arg("ssid");
     password = server.arg("password");
+    universe = server.arg("universe").toInt();
     saveWiFiCredentials(ssid, password);
     setupDualWiFi();
     server.send(200, "text/plain", "Settings updated. Please reconnect.");
@@ -131,43 +122,31 @@ void setupWebServer() {
   server.begin();
 }
 
+// Handle Art-Net data reception
 void setupArtNet() {
   artnet.begin();
   artnet.setArtDmxCallback([](uint16_t receivedUniverse, uint16_t length, uint8_t sequence, uint8_t* data) {
     if (receivedUniverse == universe && length >= numLeds * 3) {
-      lastDmxPacketTime = millis();
+      // Immediately update LED strip
       for (int i = 0; i < numLeds; i++) {
         int pixelIndex = i * 3;
         strip.setPixelColor(i, strip.Color(data[pixelIndex], data[pixelIndex + 1], data[pixelIndex + 2]));
       }
-      strip.show();
-      currentBlinkInterval = artnetBlinkOnInterval;
-      artnetActive = true;
+      strip.show();  // Update LEDs as soon as data is received
+      newFrameReceived = true;
     }
   });
 }
 
 void loop() {
-  artnet.read();
-  server.handleClient();
-  handleEncoder();
-  blinkLed();
+  artnet.read(); // Continuously read Art-Net data
+  server.handleClient(); // Handle web server requests
 
-  if (millis() - lastDmxPacketTime > dmxTimeout && artnetActive) {
-    artnetActive = false;
-    currentBlinkInterval = wifiConnected ? 0 : apModeBlinkInterval;
-  }
-
-  if (WiFi.status() != WL_CONNECTED && wifiConnected) {
-    currentBlinkInterval = apModeBlinkInterval;
-    wifiConnected = false;
-  } else if (WiFi.status() == WL_CONNECTED && !wifiConnected) {
-    currentBlinkInterval = 0;
-    wifiConnected = true;
-  }
-
-  if (!WiFi.isConnected() && WiFi.softAPgetStationNum() == 0) {
-    currentBlinkInterval = -1;
+  unsigned long currentTime = millis();
+  if (newFrameReceived && currentTime - lastFrameTime >= frameInterval) {
+    // Ensure frame rate synchronization
+    newFrameReceived = false;  // Reset the flag
+    lastFrameTime = currentTime; // Update the frame timer
   }
 }
 
@@ -176,13 +155,10 @@ void setup() {
   EEPROM.begin(512);
   loadWiFiCredentials();
   pinMode(builtInLedPin, OUTPUT);
-  pinMode(encoderPinA, INPUT);
-  pinMode(encoderPinB, INPUT);
-  pinMode(encoderButtonPin, INPUT_PULLUP);
+
   setupDualWiFi();
   setupWebServer();
   strip.begin();
-  strip.clear();
-  strip.show();
+  resetStrip(); // Ensure LED strip starts in a clean state
   setupArtNet();
 }
