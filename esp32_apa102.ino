@@ -15,8 +15,8 @@ const int universe = 0;                  // DMX universe
 const int eepromSize = 512;              // EEPROM size for Wi-Fi credentials
 
 // Wi-Fi Default Credentials
-const char* defaultSSID = "YourSSID";
-const char* defaultPassword = "YourPassword";
+const char* defaultSSID = "Quanta - Colab";
+const char* defaultPassword = "Guest#2024";
 
 // EEPROM Addresses
 const int ssidAddr = 0;
@@ -60,7 +60,7 @@ void setupWiFi() {
   WiFi.mode(WIFI_AP_STA);
 
   // Start Access Point mode
-  WiFi.softAP("ESP32_LED_Control", "12345678");
+  WiFi.softAP("LED_Control", "00000000");
   Serial.print("AP IP Address: ");
   Serial.println(WiFi.softAPIP());
 
@@ -113,13 +113,13 @@ void setupWebServer() {
     String apIpAddr = WiFi.softAPIP().toString();
     String staIpAddr = WiFi.localIP().toString();
 
-    String html = "<html><body>"
-                  "<h1>ESP32 LED Control</h1>"
-                  "<p>AP IP Address: " + apIpAddr + "</p>"
-                  "<p>STA IP Address: " + staIpAddr + "</p>"
+    String html = "<html><body style='font-family: Arial; text-align: center;'>"
+                  "<h1>LED Control</h1>"
+                  "<p>AP IP Address: <b>" + apIpAddr + "</b></p>"
+                  "<p>STA IP Address: <b>" + (staIpAddr == "0.0.0.0" ? "Not Connected" : staIpAddr) + "</b></p>"
                   "<form action='/setwifi' method='POST'>"
-                  "SSID: <input type='text' name='ssid'><br>"
-                  "Password: <input type='password' name='password'><br>"
+                  "SSID: <input type='text' name='ssid' required><br><br>"
+                  "Password: <input type='password' name='password' required><br><br>"
                   "<input type='submit' value='Save'>"
                   "</form>"
                   "</body></html>";
@@ -128,11 +128,20 @@ void setupWebServer() {
   });
 
   server.on("/setwifi", []() {
-    ssid = server.arg("ssid");
-    password = server.arg("password");
-    saveWiFiCredentials(ssid, password);
+    String newSSID = server.arg("ssid");
+    String newPassword = server.arg("password");
+
+    if (newSSID.isEmpty() || newPassword.isEmpty()) {
+      server.send(400, "text/plain", "SSID and Password cannot be empty!");
+      return;
+    }
+
+    saveWiFiCredentials(newSSID, newPassword);
+    ssid = newSSID;
+    password = newPassword;
+
     setupWiFi();
-    server.send(200, "text/plain", "Wi-Fi settings saved. Please reconnect.");
+    server.send(200, "text/plain", "Wi-Fi settings saved. Reboot the device to apply changes.");
   });
 
   server.begin();
