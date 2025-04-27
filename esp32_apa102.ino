@@ -6,6 +6,7 @@
 #include <Adafruit_DotStar.h>
 #include <ArtnetWifi.h>
 
+// Configuration
 const int numLeds = 30;
 const int dataPin = 14;
 const int clockPin = 12;
@@ -13,30 +14,46 @@ const int builtInLedPin = 2;
 int universe = 0;
 const int eepromSize = 512;
 
+// Wi-Fi Default Credentials
 const char* defaultSSID = "____2Ghz";
 const char* defaultPassword = "Aa00000000";
 
+// EEPROM Addresses
 const int ssidAddr = 0;
 const int passwordAddr = 32;
 const int universeAddr = 100;
 
+// Instances
 Adafruit_DotStar strip(numLeds, dataPin, clockPin, DOTSTAR_BGR);
 ArtnetWifi artnet;
 WebServer server(80);
 
+// Buffer for ArtNet frames
+const int maxBufferedFrames = 15;
+uint8_t artnetBuffer[maxBufferedFrames][numLeds * 3];
+int writeIndex = 0;
+int readIndex = 0;
+volatile int framesInBuffer = 0;
+
+// Global Variables
 String ssid;
 String password;
 
+// Function to handle incoming Art-Net DMX packets
 void onArtNetDMX(uint16_t receivedUniverse, uint16_t length, uint8_t sequence, uint8_t* data) {
   if (receivedUniverse == universe && length >= numLeds * 3) {
-    for (int i = 0; i < numLeds; i++) {
-      int offset = i * 3;
-      strip.setPixelColor(i, strip.Color(data[offset], data[offset + 1], data[offset + 2]));
+    memcpy(artnetBuffer[writeIndex], data, numLeds * 3);
+    writeIndex = (writeIndex + 1) % maxBufferedFrames;
+    if (framesInBuffer < maxBufferedFrames) {
+      framesInBuffer++;
+    } else {
+      // If buffer full, overwrite oldest
+      readIndex = (readIndex + 1) % maxBufferedFrames;
     }
-    strip.show();
   }
 }
 
+// Save Wi-Fi credentials and universe to EEPROM
 void saveSettings(const String& ssid, const String& password, int universe) {
   EEPROM.writeString(ssidAddr, ssid);
   EEPROM.writeString(passwordAddr, password);
@@ -44,6 +61,7 @@ void saveSettings(const String& ssid, const String& password, int universe) {
   EEPROM.commit();
 }
 
+// Load Wi-Fi credentials and universe from EEPROM
 void loadSettings() {
   ssid = EEPROM.readString(ssidAddr);
   password = EEPROM.readString(passwordAddr);
@@ -60,11 +78,13 @@ void loadSettings() {
   }
 }
 
+// Clear the LED strip
 void clearStrip() {
   strip.clear();
   strip.show();
 }
 
+// Set up Wi-Fi (Station + Access Point mode)
 void setupWiFi() {
   WiFi.mode(WIFI_AP_STA);
 
@@ -97,6 +117,7 @@ void setupWiFi() {
   }
 }
 
+// Set up or reset Art-Net with current universe
 void setupArtNet() {
   artnet.begin();
   artnet.setArtDmxCallback(onArtNetDMX);
@@ -104,6 +125,7 @@ void setupArtNet() {
   Serial.println(universe);
 }
 
+// Set up the web server for configuration
 void setupWebServer() {
   server.on("/", []() {
     String apIpAddr = WiFi.softAPIP().toString();
@@ -151,7 +173,6 @@ void setupWebServer() {
     universe = newUniverse;
 
     Serial.println("Settings saved. Reinitializing Art-Net...");
-
     setupArtNet();
 
     server.send(200, "text/plain", "Settings saved. Art-Net universe updated. No reboot needed.");
@@ -189,13 +210,22 @@ void setup() {
 }
 
 void loop() {
-  bool artnetBusy = false;
+  artnet.read(); 
 
-  while (artnet.read() > 0) {
-    artnetBusy = true;
+  if (framesInBuffer > 0) {
+    for (int i = 0; i < numLeds; i++) {
+      int offset = i * 3;
+      strip.setPixelColor(i, strip.Color(
+        artnetBuffer[readIndex][offset],
+        artnetBuffer[readIndex][offset + 1],
+        artnetBuffer[readIndex][offset + 2]
+      ));
+    }
+    strip.show();
+
+    readIndex = (readIndex + 1) % maxBufferedFrames;
+    framesInBuffer--;
   }
 
-  if (!artnetBusy) {
-    server.handleClient();
-  }
+  server.handleClient();
 }
