@@ -23,6 +23,9 @@ const int ssidAddr = 0;
 const int passwordAddr = 32;
 const int universeAddr = 100;
 
+unsigned long lastFrameTime = 0;
+const unsigned long frameInterval = 22; // ~44fps = 22ms
+
 // Instances
 Adafruit_DotStar strip(numLeds, dataPin, clockPin, DOTSTAR_BGR);
 ArtnetWifi artnet;
@@ -209,10 +212,13 @@ void setup() {
   setupArtNet();
 }
 
-void loop() {
-  artnet.read(); 
 
-  if (framesInBuffer > 0) {
+void loop() {
+  artnet.read(); // keep reading ArtNet
+
+  unsigned long now = millis();
+  
+  if (framesInBuffer > 0 && (now - lastFrameTime) >= frameInterval) {
     for (int i = 0; i < numLeds; i++) {
       int offset = i * 3;
       strip.setPixelColor(i, strip.Color(
@@ -222,6 +228,7 @@ void loop() {
       ));
     }
     strip.show();
+    lastFrameTime = now;
 
     readIndex = (readIndex + 1) % maxBufferedFrames;
     framesInBuffer--;
