@@ -6,7 +6,6 @@
 #include <Adafruit_DotStar.h>
 #include <ArtnetWifi.h>
 
-// Configuration
 const int numLeds = 30;
 const int dataPin = 14;
 const int clockPin = 12;
@@ -14,25 +13,20 @@ const int builtInLedPin = 2;
 int universe = 0;
 const int eepromSize = 512;
 
-// Wi-Fi Default Credentials
 const char* defaultSSID = "____2Ghz";
 const char* defaultPassword = "Aa00000000";
 
-// EEPROM Addresses
 const int ssidAddr = 0;
 const int passwordAddr = 32;
 const int universeAddr = 100;
 
-// Instances
 Adafruit_DotStar strip(numLeds, dataPin, clockPin, DOTSTAR_BGR);
 ArtnetWifi artnet;
 WebServer server(80);
 
-// Global Variables
 String ssid;
 String password;
 
-// Function to handle incoming Art-Net DMX packets
 void onArtNetDMX(uint16_t receivedUniverse, uint16_t length, uint8_t sequence, uint8_t* data) {
   if (receivedUniverse == universe && length >= numLeds * 3) {
     for (int i = 0; i < numLeds; i++) {
@@ -43,7 +37,6 @@ void onArtNetDMX(uint16_t receivedUniverse, uint16_t length, uint8_t sequence, u
   }
 }
 
-// Function to save Wi-Fi credentials and universe to EEPROM
 void saveSettings(const String& ssid, const String& password, int universe) {
   EEPROM.writeString(ssidAddr, ssid);
   EEPROM.writeString(passwordAddr, password);
@@ -51,7 +44,6 @@ void saveSettings(const String& ssid, const String& password, int universe) {
   EEPROM.commit();
 }
 
-// Function to load Wi-Fi credentials and universe from EEPROM
 void loadSettings() {
   ssid = EEPROM.readString(ssidAddr);
   password = EEPROM.readString(passwordAddr);
@@ -68,13 +60,11 @@ void loadSettings() {
   }
 }
 
-// Function to clear the LED strip
 void clearStrip() {
   strip.clear();
   strip.show();
 }
 
-// Function to set up Wi-Fi (Station + Access Point mode)
 void setupWiFi() {
   WiFi.mode(WIFI_AP_STA);
 
@@ -107,7 +97,6 @@ void setupWiFi() {
   }
 }
 
-// Function to set up or reset Art-Net with current universe
 void setupArtNet() {
   artnet.begin();
   artnet.setArtDmxCallback(onArtNetDMX);
@@ -115,7 +104,6 @@ void setupArtNet() {
   Serial.println(universe);
 }
 
-// Function to set up the web server for configuration
 void setupWebServer() {
   server.on("/", []() {
     String apIpAddr = WiFi.softAPIP().toString();
@@ -201,15 +189,12 @@ void setup() {
 }
 
 void loop() {
-  // Priorizar totalmente o processamento de ArtNet
   bool artnetBusy = false;
 
-  // Esvaziar buffer ArtNet completamente
   while (artnet.read() > 0) {
     artnetBusy = true;
   }
 
-  // Se não tem ArtNet urgente para processar, então cuida do WebServer
   if (!artnetBusy) {
     server.handleClient();
   }
