@@ -7,20 +7,21 @@
 #include <ArtnetWifi.h>
 
 // Configuration
-const int numLeds = 30;                  // Number of LEDs
-const int dataPin = 14;                  // Data pin for LED strip
-const int clockPin = 12;                 // Clock pin for LED strip
-const int builtInLedPin = 2;             // Built-in LED for status
-const int universe = 0;                  // DMX universe
-const int eepromSize = 512;              // EEPROM size for Wi-Fi credentials
+const int numLeds = 30;
+const int dataPin = 14;
+const int clockPin = 12;
+const int builtInLedPin = 2;
+int universe = 0;
+const int eepromSize = 512;
 
 // Wi-Fi Default Credentials
-const char* defaultSSID = "Quanta - Colab";
-const char* defaultPassword = "Guest#2024";
+const char* defaultSSID = "____2Ghz";
+const char* defaultPassword = "Aa00000000";
 
 // EEPROM Addresses
 const int ssidAddr = 0;
 const int passwordAddr = 32;
+const int universeAddr = 100;
 
 // Instances
 Adafruit_DotStar strip(numLeds, dataPin, clockPin, DOTSTAR_BGR);
@@ -31,21 +32,39 @@ WebServer server(80);
 String ssid;
 String password;
 
-// Function to save Wi-Fi credentials to EEPROM
-void saveWiFiCredentials(const String& ssid, const String& password) {
+// Function to handle incoming Art-Net DMX packets
+void onArtNetDMX(uint16_t receivedUniverse, uint16_t length, uint8_t sequence, uint8_t* data) {
+  if (receivedUniverse == universe && length >= numLeds * 3) {
+    for (int i = 0; i < numLeds; i++) {
+      int offset = i * 3;
+      strip.setPixelColor(i, strip.Color(data[offset], data[offset + 1], data[offset + 2]));
+    }
+    strip.show();
+  }
+}
+
+// Function to save Wi-Fi credentials and universe to EEPROM
+void saveSettings(const String& ssid, const String& password, int universe) {
   EEPROM.writeString(ssidAddr, ssid);
   EEPROM.writeString(passwordAddr, password);
+  EEPROM.writeInt(universeAddr, universe);
   EEPROM.commit();
 }
 
-// Function to load Wi-Fi credentials from EEPROM
-void loadWiFiCredentials() {
+// Function to load Wi-Fi credentials and universe from EEPROM
+void loadSettings() {
   ssid = EEPROM.readString(ssidAddr);
   password = EEPROM.readString(passwordAddr);
+  universe = EEPROM.readInt(universeAddr);
 
   if (ssid.isEmpty() || password.isEmpty()) {
     ssid = defaultSSID;
     password = defaultPassword;
+  }
+
+  if (universe < 0 || universe > 32767) {
+    Serial.println("Universe invalid in EEPROM. Setting to 0.");
+    universe = 0;
   }
 }
 
@@ -59,12 +78,10 @@ void clearStrip() {
 void setupWiFi() {
   WiFi.mode(WIFI_AP_STA);
 
-  // Start Access Point mode
   WiFi.softAP("LED_Control", "00000000");
   Serial.print("AP IP Address: ");
   Serial.println(WiFi.softAPIP());
 
-  // Attempt to connect in Station mode
   WiFi.begin(ssid.c_str(), password.c_str());
   Serial.print("Connecting to Wi-Fi");
 
@@ -90,21 +107,12 @@ void setupWiFi() {
   }
 }
 
-// Function to handle Art-Net data
+// Function to set up or reset Art-Net with current universe
 void setupArtNet() {
   artnet.begin();
-
-  // Callback for handling DMX data
-  artnet.setArtDmxCallback([](uint16_t receivedUniverse, uint16_t length, uint8_t sequence, uint8_t* data) {
-    if (receivedUniverse == universe && length >= numLeds * 3) {
-      // Update LED strip
-      for (int i = 0; i < numLeds; i++) {
-        int offset = i * 3;
-        strip.setPixelColor(i, strip.Color(data[offset], data[offset + 1], data[offset + 2]));
-      }
-      strip.show();
-    }
-  });
+  artnet.setArtDmxCallback(onArtNetDMX);
+  Serial.print("Listening for Art-Net universe: ");
+  Serial.println(universe);
 }
 
 // Function to set up the web server for configuration
@@ -120,7 +128,12 @@ void setupWebServer() {
                   "<form action='/setwifi' method='POST'>"
                   "SSID: <input type='text' name='ssid' required><br><br>"
                   "Password: <input type='password' name='password' required><br><br>"
+                  "Universe: <input type='number' name='universe' min='0' max='32767' value='" + String(universe) + "' required><br><br>"
                   "<input type='submit' value='Save'>"
+                  "</form>"
+                  "<br><hr><br>"
+                  "<form action='/reset' method='POST'>"
+                  "<input type='submit' value='Reset Settings (Clear EEPROM)' style='background-color: red; color: white; padding: 10px 20px; border: none; border-radius: 5px;'>"
                   "</form>"
                   "</body></html>";
 
@@ -130,18 +143,43 @@ void setupWebServer() {
   server.on("/setwifi", []() {
     String newSSID = server.arg("ssid");
     String newPassword = server.arg("password");
+    String universeStr = server.arg("universe");
 
-    if (newSSID.isEmpty() || newPassword.isEmpty()) {
-      server.send(400, "text/plain", "SSID and Password cannot be empty!");
+    if (newSSID.isEmpty() || newPassword.isEmpty() || universeStr.isEmpty()) {
+      server.send(400, "text/plain", "All fields must be filled!");
       return;
     }
 
-    saveWiFiCredentials(newSSID, newPassword);
+    int newUniverse = universeStr.toInt();
+    if (newUniverse < 0 || newUniverse > 32767) {
+      server.send(400, "text/plain", "Invalid universe value!");
+      return;
+    }
+
+    saveSettings(newSSID, newPassword, newUniverse);
+
     ssid = newSSID;
     password = newPassword;
+    universe = newUniverse;
 
-    setupWiFi();
-    server.send(200, "text/plain", "Wi-Fi settings saved. Reboot the device to apply changes.");
+    Serial.println("Settings saved. Reinitializing Art-Net...");
+
+    setupArtNet();
+
+    server.send(200, "text/plain", "Settings saved. Art-Net universe updated. No reboot needed.");
+  });
+
+  server.on("/reset", []() {
+    Serial.println("Resetting settings...");
+
+    for (int i = 0; i < eepromSize; i++) {
+      EEPROM.write(i, 0);
+    }
+    EEPROM.commit();
+
+    server.send(200, "text/plain", "Settings cleared. Rebooting...");
+    delay(1000);
+    ESP.restart();
   });
 
   server.begin();
@@ -149,23 +187,30 @@ void setupWebServer() {
 }
 
 void setup() {
-  // Initialize serial, EEPROM, and built-in LED
   Serial.begin(115200);
   EEPROM.begin(eepromSize);
   pinMode(builtInLedPin, OUTPUT);
 
-  // Load Wi-Fi credentials and initialize components
-  loadWiFiCredentials();
+  loadSettings();
   setupWiFi();
   setupWebServer();
 
-  // Initialize LED strip and Art-Net
   strip.begin();
   clearStrip();
   setupArtNet();
 }
 
 void loop() {
-  artnet.read();       // Continuously read Art-Net packets
-  server.handleClient(); // Handle web server requests
+  // Priorizar totalmente o processamento de ArtNet
+  bool artnetBusy = false;
+
+  // Esvaziar buffer ArtNet completamente
+  while (artnet.read() > 0) {
+    artnetBusy = true;
+  }
+
+  // Se não tem ArtNet urgente para processar, então cuida do WebServer
+  if (!artnetBusy) {
+    server.handleClient();
+  }
 }
